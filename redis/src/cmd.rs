@@ -12,7 +12,7 @@ use std::{fmt, io};
 
 use crate::connection::ConnectionLike;
 use crate::pipeline::Pipeline;
-use crate::types::{from_owned_redis_value, FromRedisValue, RedisResult, RedisWrite, ToRedisArgs};
+use crate::types::{from_owned_redis_value, FromRedisValue, RedisResult, RedisWrite, ToRedisArgs, Value};
 
 /// An argument to a redis command
 #[derive(Clone)]
@@ -86,19 +86,21 @@ pub struct Cmd {
     cache: Option<CommandCacheConfig>,
 }
 
+type IterBatch<T> = std::iter::Map<std::vec::IntoIter<Value>, fn(Value) -> RedisResult<T>>;
+
 /// Represents a redis iterator.
 pub struct Iter<'a, T: FromRedisValue> {
-    batch: std::vec::IntoIter<T>,
+    batch: IterBatch<T>,
     cursor: u64,
     con: &'a mut (dyn ConnectionLike + 'a),
     cmd: Cmd,
 }
 
 impl<T: FromRedisValue> Iterator for Iter<'_, T> {
-    type Item = T;
+    type Item = RedisResult<T>;
 
     #[inline]
-    fn next(&mut self) -> Option<T> {
+    fn next(&mut self) -> Option<RedisResult<T>> {
         // we need to do this in a loop until we produce at least one item
         // or we find the actual end of the iteration.  This is necessary
         // because with filtering an iterator it is possible that a whole
@@ -113,10 +115,10 @@ impl<T: FromRedisValue> Iterator for Iter<'_, T> {
 
             let pcmd = self.cmd.get_packed_command_with_cursor(self.cursor)?;
             let rv = self.con.req_packed_command(&pcmd).ok()?;
-            let (cur, batch): (u64, Vec<T>) = from_owned_redis_value(rv).ok()?;
+            let (cur, values): (u64, Vec<Value>) = from_owned_redis_value(rv).ok()?;
 
             self.cursor = cur;
-            self.batch = batch.into_iter();
+            self.batch = to_iter_batch(values);
         }
     }
 }
@@ -127,7 +129,7 @@ use crate::aio::ConnectionLike as AsyncConnection;
 /// The inner future of AsyncIter
 #[cfg(feature = "aio")]
 struct AsyncIterInner<'a, T: FromRedisValue + 'a> {
-    batch: std::vec::IntoIter<T>,
+    batch: IterBatch<T>,
     con: &'a mut (dyn AsyncConnection + Send + 'a),
     cmd: Cmd,
 }
@@ -136,7 +138,7 @@ struct AsyncIterInner<'a, T: FromRedisValue + 'a> {
 #[cfg(feature = "aio")]
 enum IterOrFuture<'a, T: FromRedisValue + 'a> {
     Iter(AsyncIterInner<'a, T>),
-    Future(BoxFuture<'a, (AsyncIterInner<'a, T>, Option<T>)>),
+    Future(BoxFuture<'a, (AsyncIterInner<'a, T>, Option<RedisResult<T>>)>),
     Empty,
 }
 
@@ -149,7 +151,7 @@ pub struct AsyncIter<'a, T: FromRedisValue + 'a> {
 #[cfg(feature = "aio")]
 impl<'a, T: FromRedisValue + 'a> AsyncIterInner<'a, T> {
     #[inline]
-    pub async fn next_item(&mut self) -> Option<T> {
+    pub async fn next_item(&mut self) -> Option<RedisResult<T>> {
         // we need to do this in a loop until we produce at least one item
         // or we find the actual end of the iteration.  This is necessary
         // because with filtering an iterator it is possible that a whole
@@ -167,10 +169,10 @@ impl<'a, T: FromRedisValue + 'a> AsyncIterInner<'a, T> {
             }
 
             let rv = self.con.req_packed_command(&self.cmd).await.ok()?;
-            let (cur, batch): (u64, Vec<T>) = from_owned_redis_value(rv).ok()?;
+            let (cur, values): (u64, Vec<Value>) = from_owned_redis_value(rv).ok()?;
 
             self.cmd.cursor = Some(cur);
-            self.batch = batch.into_iter();
+            self.batch = to_iter_batch(values);
         }
     }
 }
@@ -192,16 +194,16 @@ impl<'a, T: FromRedisValue + 'a + Unpin + Send> AsyncIter<'a, T> {
     /// # }
     /// ```
     #[inline]
-    pub async fn next_item(&mut self) -> Option<T> {
+    pub async fn next_item(&mut self) -> Option<RedisResult<T>> {
         StreamExt::next(self).await
     }
 }
 
 #[cfg(feature = "aio")]
 impl<'a, T: FromRedisValue + Unpin + Send + 'a> Stream for AsyncIter<'a, T> {
-    type Item = T;
+    type Item = RedisResult<T>;
 
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<T>> {
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<RedisResult<T>>> {
         let this = self.get_mut();
         let inner = std::mem::replace(&mut this.inner, IterOrFuture::Empty);
         match inner {
@@ -319,6 +321,10 @@ where
         cmd.write_all(b"\r\n")?;
     }
     Ok(())
+}
+
+fn to_iter_batch<T: FromRedisValue>(values: Vec<Value>) -> IterBatch<T> {
+    values.into_iter().map(|value| from_owned_redis_value(value))
 }
 
 impl RedisWrite for Cmd {
@@ -536,14 +542,14 @@ impl Cmd {
     pub fn iter<T: FromRedisValue>(self, con: &mut dyn ConnectionLike) -> RedisResult<Iter<'_, T>> {
         let rv = con.req_command(&self)?;
 
-        let (cursor, batch) = if rv.looks_like_cursor() {
-            from_owned_redis_value::<(u64, Vec<T>)>(rv)?
+        let (cursor, values) = if rv.looks_like_cursor() {
+            from_owned_redis_value::<(u64, Vec<Value>)>(rv)?
         } else {
             (0, from_owned_redis_value(rv)?)
         };
 
         Ok(Iter {
-            batch: batch.into_iter(),
+            batch: to_iter_batch(values),
             cursor,
             con,
             cmd: self,
@@ -573,11 +579,12 @@ impl Cmd {
     ) -> RedisResult<AsyncIter<'a, T>> {
         let rv = con.req_packed_command(&self).await?;
 
-        let (cursor, batch) = if rv.looks_like_cursor() {
-            from_owned_redis_value::<(u64, Vec<T>)>(rv)?
+        let (cursor, values) = if rv.looks_like_cursor() {
+            from_owned_redis_value::<(u64, Vec<Value>)>(rv)?
         } else {
             (0, from_owned_redis_value(rv)?)
         };
+
         if cursor == 0 {
             self.cursor = None;
         } else {
@@ -586,7 +593,7 @@ impl Cmd {
 
         Ok(AsyncIter {
             inner: IterOrFuture::Iter(AsyncIterInner {
-                batch: batch.into_iter(),
+                batch: to_iter_batch(values),
                 con,
                 cmd: self,
             }),

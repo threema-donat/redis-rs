@@ -9,9 +9,7 @@ mod basic_async {
     #[cfg(feature = "connection-manager")]
     use redis::aio::ConnectionManager;
     use redis::{
-        aio::{ConnectionLike, MultiplexedConnection},
-        cmd, pipe, AsyncCommands, ConnectionInfo, ErrorKind, ProtocolVersion, PushKind,
-        RedisConnectionInfo, RedisError, RedisFuture, RedisResult, ScanOptions, ToRedisArgs, Value,
+        aio::{ConnectionLike, MultiplexedConnection}, cmd, pipe, AsyncCommands, ConnectionInfo, ErrorKind, FromRedisValue, ProtocolVersion, PushKind, RedisConnectionInfo, RedisError, RedisFuture, RedisResult, ScanOptions, ToRedisArgs, Value
     };
     use redis_test::server::use_protocol;
     use rstest::rstest;
@@ -586,6 +584,7 @@ mod basic_async {
                     .unwrap();
 
                 while let Some(x) = iter.next_item().await {
+                    let x = x.unwrap();
                     // if this assertion fails, too many items were returned by the iterator.
                     assert!(unseen.remove(&x));
                 }
@@ -631,6 +630,7 @@ mod basic_async {
                     .unwrap();
 
                 while let Some(item) = iter.next_item().await {
+                    let item = item.unwrap();
                     // if this assertion fails, too many items were returned by the iterator.
                     assert!(unseen.remove(&item));
                 }
@@ -675,8 +675,9 @@ mod basic_async {
                     .await
                     .unwrap();
 
-                let collection: Vec<String> = iter.collect().await;
+                let collection: Vec<RedisResult<String>> = iter.collect().await;
                 for item in collection {
+                    let item = item.unwrap();
                     // if this assertion fails, too many items were returned by the iterator.
                     assert!(unseen.remove(&item));
                 }
@@ -931,10 +932,53 @@ mod basic_async {
                 }
 
                 let iter: redis::AsyncIter<String> = con.scan().await.unwrap();
-                let mut keys_from_redis: Vec<_> = iter.collect().await;
+                let mut keys_from_redis: Vec<_> = iter.map(std::result::Result::unwrap).collect().await;
                 keys_from_redis.sort();
                 assert_eq!(keys, keys_from_redis);
                 assert_eq!(keys.len(), 100);
+                Ok(())
+            },
+            runtime,
+        );
+    }
+
+    #[rstest]
+    // Test issue of AsyncCommands::scan not returning keys because wrong assumptions about the key type were made
+    // https://github.com/redis-rs/redis-rs/issues/1309
+    #[cfg_attr(feature = "tokio-comp", case::tokio(RuntimeType::Tokio))]
+    #[cfg_attr(feature = "async-std-comp", case::async_std(RuntimeType::AsyncStd))]
+    #[cfg_attr(feature = "smol-comp", case::smol(RuntimeType::Smol))]
+    fn test_issue_async_commands_scan_finishing_prematurely(#[case] runtime: RuntimeType) {
+        const PREFIX: &str = "async-key";
+
+        struct Container(String);
+
+        impl FromRedisValue for Container {
+            fn from_redis_value(v: &Value) -> RedisResult<Self> {
+                let text = String::from_redis_value(v)?;
+
+                if !text.starts_with(PREFIX) {
+                    return Err((ErrorKind::TypeError, "Does not start with correct prefix").into());
+                }
+
+                Ok(Container(text))
+            }
+        }
+
+        test_with_all_connection_types(
+            |mut con| async move {
+                let keys: Vec<String> = (0..100).map(|i| format!("{}{i}", if i == 50 {"NOPE"} else {PREFIX})).collect();
+
+                for key in &keys {
+                    let _: () = con.set(key, b"bar").await.unwrap();
+                }
+
+                let iter: redis::AsyncIter<Container> = con.scan().await.unwrap();
+
+                let keys_from_redis = iter.filter_map(async |result| result.ok().map(|container| container.0)).collect::<Vec<_>>().await;
+
+                assert!(keys.iter().filter(|key| key.starts_with(PREFIX)).all(|key| keys_from_redis.contains(key)));
+                assert_eq!(keys_from_redis.len(), 99);
                 Ok(())
             },
             runtime,

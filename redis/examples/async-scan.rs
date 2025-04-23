@@ -7,10 +7,10 @@ async fn main() -> redis::RedisResult<()> {
     let mut con = client.get_multiplexed_async_connection().await?;
 
     let _: () = con.set("async-key1", b"foo").await?;
-    let _: () = con.set("async-key2", b"foo").await?;
+    let _: () = con.set("async-key2", b"bar").await?;
 
     let iter: AsyncIter<String> = con.scan().await?;
-    let mut keys: Vec<_> = iter.collect().await;
+    let mut keys: Vec<_> = iter.filter_map(async |result| result.ok()).collect().await;
 
     keys.sort();
 

@@ -1133,7 +1133,7 @@ mod basic {
 
         for x in iter {
             // type inference limitations
-            let x: usize = x;
+            let x: usize = x.unwrap();
             unseen.remove(&x);
         }
 
@@ -1157,7 +1157,7 @@ mod basic {
 
         let iter = con
             .hscan_match::<&str, &str, (String, usize)>("foo", "key_0_*")
-            .unwrap();
+            .unwrap().map(std::result::Result::unwrap);
 
         for (_field, value) in iter {
             unseen.remove(&value);
@@ -1969,7 +1969,7 @@ mod basic {
         let iter: redis::Iter<'_, (String, isize)> = con.hscan("my_hash").unwrap();
         let mut found = HashSet::new();
         for item in iter {
-            found.insert(item);
+            found.insert(item.unwrap());
         }
 
         assert_eq!(found.len(), 2);
