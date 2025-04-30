@@ -1131,8 +1131,14 @@ mod basic {
             .iter(&mut con)
             .unwrap();
 
+        #[cfg(feature = "safe_iterators")]
         for x in iter {
-            // type inference limitations
+            let x: usize = x.unwrap();
+            unseen.remove(&x);
+        }
+
+        #[cfg(not(feature = "safe_iterators"))]
+        for x in iter {
             let x: usize = x;
             unseen.remove(&x);
         }
@@ -1140,6 +1146,7 @@ mod basic {
         assert_eq!(unseen.len(), 0);
     }
 
+    #[cfg(feature = "safe_iterators")]
     #[test]
     fn test_checked_scanning_error() {
         let ctx = TestContext::new();
@@ -1164,14 +1171,14 @@ mod basic {
         // get an iterator for SCAN over all redis keys
         // Specify count=1 so we don't get the invalid UTF-8 scenario in the first scan
         let mut iter = con
-            .checked_scan_options::<String>(ScanOptions::default().with_count(1))
+            .scan_options::<String>(ScanOptions::default().with_count(1))
             .unwrap();
 
         let mut err_flag = false;
         let mut count = 0;
 
         // iterate over the entire keyspace till we reach the end
-        while let Some(x) = iter.next() {
+        for x in iter {
             if x.is_err() {
                 // we found the error case
                 err_flag = true;
@@ -1185,7 +1192,7 @@ mod basic {
         assert_eq!(count, 1000);
 
         // make sure we encountered the error (i.e. instead of silent failure)
-        assert_eq!(err_flag, true);
+        assert!(err_flag);
     }
 
     #[test]
@@ -1207,7 +1214,14 @@ mod basic {
             .hscan_match::<&str, &str, (String, usize)>("foo", "key_0_*")
             .unwrap();
 
+        #[cfg(not(feature = "safe_iterators"))]
         for (_field, value) in iter {
+            unseen.remove(&value);
+        }
+
+        #[cfg(feature = "safe_iterators")]
+        for res in iter {
+            let (_, value) = res.unwrap();
             unseen.remove(&value);
         }
 
@@ -2016,7 +2030,14 @@ mod basic {
 
         let iter: redis::Iter<'_, (String, isize)> = con.hscan("my_hash").unwrap();
         let mut found = HashSet::new();
+
+        #[cfg(not(feature = "safe_iterators"))]
         for item in iter {
+            found.insert(item);
+        }
+
+        #[cfg(feature = "safe_iterators")]
+        for item in iter.map(std::result::Result::unwrap) {
             found.insert(item);
         }
 

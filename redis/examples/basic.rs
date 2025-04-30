@@ -1,4 +1,4 @@
-use redis::{transaction, Commands};
+use redis::{transaction, Commands, Iter};
 
 use std::collections::HashMap;
 use std::env;
@@ -38,6 +38,20 @@ fn do_print_max_entry_limits(con: &mut redis::Connection) -> redis::RedisResult<
     Ok(())
 }
 
+#[cfg(not(feature = "safe_iterators"))]
+fn sum_iter(iter: Iter<i32>) -> redis::RedisResult<i32> {
+    Ok(iter.sum())
+}
+
+#[cfg(feature = "safe_iterators")]
+fn sum_iter(iter: Iter<i32>) -> redis::RedisResult<i32> {
+    let mut sum = 0;
+    for res in iter {
+        sum += res?;
+    }
+    Ok(sum)
+}
+
 /// This is a pretty stupid example that demonstrates how to create a large
 /// set through a pipeline and how to iterate over it through implied
 /// cursors.
@@ -62,7 +76,7 @@ fn do_show_scanning(con: &mut redis::Connection) -> redis::RedisResult<()> {
     // as a simple exercise we just sum up the iterator.  Since the fold
     // method carries an initial value we do not need to define the
     // type of the iterator, rust will figure "int" out for us.
-    let sum: i32 = cmd.iter::<i32>(con)?.sum();
+    let sum = sum_iter(cmd.iter::<i32>(con)?)?;
 
     println!("The sum of all numbers in the set 0-1000: {sum}");
 
