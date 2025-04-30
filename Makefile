@@ -1,5 +1,5 @@
 build:
-	@RUSTFLAGS="-D warnings" cargo build --locked -p redis
+	@RUSTFLAGS="-D warnings" cargo build --locked -F safe_iterators -p redis
 
 test:
 	@echo "===================================================================="
