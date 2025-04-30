@@ -1170,7 +1170,7 @@ mod basic {
 
         // get an iterator for SCAN over all redis keys
         // Specify count=1 so we don't get the invalid UTF-8 scenario in the first scan
-        let mut iter = con
+        let iter = con
             .scan_options::<String>(ScanOptions::default().with_count(1))
             .unwrap();
 
