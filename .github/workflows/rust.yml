@@ -256,7 +256,7 @@ jobs:
 
         - run: |
             cargo install --git https://github.com/nihohit/flag-frenzy.git
-            flag-frenzy --package redis
+            flag-frenzy --package redis --config .flag-frenzy
 
   windows-build:
     runs-on: windows-latest

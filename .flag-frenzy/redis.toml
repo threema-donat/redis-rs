@@ -1,0 +1,3 @@
+[[rule]]
+when = true
+require = "safe_iterators"
